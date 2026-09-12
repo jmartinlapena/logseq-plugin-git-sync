@@ -44,14 +44,84 @@ if (isDevelopment) {
 } else {
   console.log("=== logseq-plugin-git loaded ===");
   logseq.ready(() => {
-    const runAutoSync = debounce(async function () {
-      setPluginStyle(LOADING_STYLE);
+    let autoCommitTimer: ReturnType<typeof setTimeout> | undefined;
+    let periodicTimer: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
+
+    const readSecondsSetting = (
+      key: string,
+      fallback: number,
+      min: number,
+      max: number
+    ) => {
+      const raw = Number(logseq.settings?.[key]);
+      if (!Number.isFinite(raw)) return fallback;
+      return Math.min(max, Math.max(min, raw));
+    };
+
+    const autoCommitDelayMs = () =>
+      readSecondsSetting("autoCommitDelaySeconds", 10, 2, 3600) * 1000;
+
+    const periodicIntervalMs = () =>
+      readSecondsSetting("periodicSyncIntervalSeconds", 60, 15, 86400) * 1000;
+
+    const runWorkflow = async (
+      commitLocalChanges: boolean,
+      showSuccess = false,
+      showLoading = false
+    ) => {
+      if (showLoading) setPluginStyle(LOADING_STYLE);
       try {
-        await safeSync(false);
+        return commitLocalChanges
+          ? await commitAndSync(showSuccess)
+          : await safeSync(showSuccess);
       } finally {
         await checkStatus();
       }
+    };
+
+    const automaticWorkflow = async (showLoading = false) => {
+      const shouldCommit = Boolean(logseq.settings?.autoCommitAndSyncOnChange);
+      return runWorkflow(shouldCommit, false, showLoading);
+    };
+
+    const runAutoSync = debounce(async function () {
+      await automaticWorkflow(true);
     }, 500);
+
+    const runFocusSync = debounce(async function () {
+      if (!logseq.settings?.autoSyncOnFocus) return;
+      if (logseq.settings?.autoCheckSynced) checkIsSynced();
+      await automaticWorkflow(true);
+    }, 300);
+
+    const scheduleAutoCommitAndSync = () => {
+      if (!logseq.settings?.autoCommitAndSyncOnChange) return;
+
+      if (autoCommitTimer) clearTimeout(autoCommitTimer);
+      autoCommitTimer = setTimeout(async () => {
+        autoCommitTimer = undefined;
+        if (disposed || !logseq.settings?.autoCommitAndSyncOnChange) return;
+        await runWorkflow(true, false, false);
+      }, autoCommitDelayMs());
+    };
+
+    const schedulePeriodicSafetySync = () => {
+      if (disposed) return;
+      if (periodicTimer) clearTimeout(periodicTimer);
+
+      periodicTimer = setTimeout(async () => {
+        periodicTimer = undefined;
+        if (disposed) return;
+
+        if (logseq.settings?.periodicSync) {
+          const shouldCommit = Boolean(logseq.settings?.autoCommitAndSyncOnChange);
+          await runWorkflow(shouldCommit, false, false);
+        }
+
+        schedulePeriodicSafetySync();
+      }, periodicIntervalMs());
+    };
 
     const operations = {
       check: debounce(async function () {
@@ -68,11 +138,7 @@ if (isDevelopment) {
       sync: debounce(async function () {
         setPluginStyle(LOADING_STYLE);
         hidePopup();
-        try {
-          await safeSync(true);
-        } finally {
-          await checkStatus();
-        }
+        await runWorkflow(false, true, false);
       }),
       pull: debounce(async function () {
         console.log("[logseq-git:] === pull click");
@@ -107,11 +173,7 @@ if (isDevelopment) {
       commitAndPush: debounce(async function () {
         setPluginStyle(LOADING_STYLE);
         hidePopup();
-        try {
-          await commitAndSync(true);
-        } finally {
-          await checkStatus();
-        }
+        await runWorkflow(true, true, false);
       }),
       log: debounce(async function () {
         console.log("[logseq-git:] === log click");
@@ -178,11 +240,10 @@ if (isDevelopment) {
       checkStatusWithDebounce();
     });
 
-    if (logseq.settings?.checkWhenDBChanged) {
-      logseq.DB.onChanged(() => {
-        checkStatusWithDebounce();
-      });
-    }
+    logseq.DB.onChanged(() => {
+      if (logseq.settings?.checkWhenDBChanged) checkStatusWithDebounce();
+      if (logseq.settings?.autoCommitAndSyncOnChange) scheduleAutoCommitAndSync();
+    });
 
     if (logseq.settings?.autoCheckSynced) checkIsSynced();
     checkStatusWithDebounce();
@@ -192,30 +253,45 @@ if (isDevelopment) {
     }
 
     logseq.App.onCurrentGraphChanged(() => {
+      if (autoCommitTimer) {
+        clearTimeout(autoCommitTimer);
+        autoCommitTimer = undefined;
+      }
       if (logseq.settings?.autoSyncOnGraphChange) {
         setTimeout(() => runAutoSync(), 500);
       }
     });
 
-    if (top) {
-      top.document?.addEventListener("visibilitychange", async () => {
-        const visibilityState = top?.document?.visibilityState;
+    const handleWindowFocus = () => {
+      runFocusSync();
+    };
 
-        if (visibilityState === "visible") {
-          if (logseq.settings?.autoCheckSynced) checkIsSynced();
-          if (logseq.settings?.autoSyncOnFocus) runAutoSync();
-        } else if (visibilityState === "hidden") {
-          if (logseq.settings?.autoPush) {
-            setPluginStyle(LOADING_STYLE);
-            try {
-              await commitAndSync(false);
-            } finally {
-              await checkStatus();
-            }
-          }
-        }
-      });
+    const handleVisibilityChange = async () => {
+      const visibilityState = top?.document?.visibilityState;
+
+      if (visibilityState === "visible") {
+        runFocusSync();
+      } else if (visibilityState === "hidden" && logseq.settings?.autoPush) {
+        await runWorkflow(true, false, true);
+      }
+    };
+
+    if (top) {
+      top.addEventListener("focus", handleWindowFocus);
+      top.document?.addEventListener("visibilitychange", handleVisibilityChange);
     }
+
+    schedulePeriodicSafetySync();
+
+    logseq.beforeunload(async () => {
+      disposed = true;
+      if (autoCommitTimer) clearTimeout(autoCommitTimer);
+      if (periodicTimer) clearTimeout(periodicTimer);
+      if (top) {
+        top.removeEventListener("focus", handleWindowFocus);
+        top.document?.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
+    });
 
     logseq.App.registerCommandPalette(
       {

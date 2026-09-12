@@ -28,8 +28,8 @@ export interface SyncResult {
 
 let workflowInProgress: Promise<SyncResult> | undefined
 
-const unknownState = (error: string): RepositorySyncState => ({
-  dirty: false,
+const unknownState = (error: string, dirty = false): RepositorySyncState => ({
+  dirty,
   ahead: 0,
   behind: 0,
   relation: "unknown",
@@ -51,9 +51,28 @@ const inspectRepository = async (): Promise<RepositorySyncState> => {
     return unknownState(gitError(statusResult, "Unable to read Git status."))
   }
 
+  const dirty = statusResult.stdout.trim() !== ""
+
+  const branchResult = await execGitCommand(["branch", "--show-current"])
+  const branchName = branchResult.stdout.trim() || "current branch"
+
+  const upstreamResult = await execGitCommand([
+    "rev-parse",
+    "--abbrev-ref",
+    "--symbolic-full-name",
+    "@{u}",
+  ])
+
+  if (upstreamResult.exitCode !== 0) {
+    return unknownState(
+      `The current branch (${branchName}) has no valid upstream. Publish it once with: git push -u origin ${branchName}`,
+      dirty
+    )
+  }
+
   const fetchResult = await fetchRemote(false)
   if (fetchResult.exitCode !== 0) {
-    return unknownState(gitError(fetchResult, "Unable to fetch the remote repository."))
+    return unknownState(gitError(fetchResult, "Unable to fetch the remote repository."), dirty)
   }
 
   const countResult = await execGitCommand([
@@ -68,17 +87,17 @@ const inspectRepository = async (): Promise<RepositorySyncState> => {
       gitError(
         countResult,
         "Unable to compare local and remote branches. Check that the current branch has an upstream."
-      )
+      ),
+      dirty
     )
   }
 
   const counts = countResult.stdout.trim().split(/\s+/).map(Number)
   if (counts.length < 2 || counts.some(Number.isNaN)) {
-    return unknownState(`Unexpected git rev-list output: ${countResult.stdout}`)
+    return unknownState(`Unexpected git rev-list output: ${countResult.stdout}`, dirty)
   }
 
   const [ahead, behind] = counts
-  const dirty = statusResult.stdout.trim() !== ""
 
   let relation: SyncRelation = "synced"
   if (ahead > 0 && behind > 0) relation = "diverged"
@@ -178,7 +197,7 @@ export const commitAndSync = async (showSuccess = false): Promise<SyncResult> =>
       const commitResult = await commit(false, commitMessage())
       if (commitResult.exitCode !== 0) {
         const error = gitError(commitResult, "Commit failed.")
-        const state = unknownState(error)
+        const state = unknownState(error, true)
         showError(`Git sync failed while committing: ${error}`)
         return { action: "error", state, error }
       }
