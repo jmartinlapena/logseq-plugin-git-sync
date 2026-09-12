@@ -11,8 +11,8 @@ import {
   pull,
   pullRebase,
   push,
-  status,
 } from "./helper/git";
+import { commitAndSync, safeSync } from "./helper/sync";
 import {
   checkStatus,
   debounce,
@@ -21,7 +21,6 @@ import {
   showPopup,
   checkIsSynced,
   checkStatusWithDebounce,
-  getPluginStyle,
 } from "./helper/util";
 import "./index.css";
 
@@ -29,22 +28,31 @@ import "./index.css";
 // https://github.com/haydenull/logseq-plugin-git/issues/48
 try {
   // @ts-ignore
-  top.logseq.sdk.git.exec_command(['status'])
+  top.logseq.sdk.git.exec_command(["status"]);
 } catch (e) {
   // @ts-ignore
-  logseq.Git['execCommand'] = async function (args: string[]) {
-    const ret = await logseq.App.execGitCommand(args)
-    return {exitCode: ret == undefined ? 1 : 0, stdout: ret}
-  }
+  logseq.Git["execCommand"] = async function (args: string[]) {
+    const ret = await logseq.App.execGitCommand(args);
+    return { exitCode: ret == undefined ? 1 : 0, stdout: ret, stderr: "" };
+  };
 }
 
-const isDevelopment = import.meta.env.DEV
+const isDevelopment = import.meta.env.DEV;
 
 if (isDevelopment) {
   renderApp("browser");
 } else {
   console.log("=== logseq-plugin-git loaded ===");
   logseq.ready(() => {
+    const runAutoSync = debounce(async function () {
+      setPluginStyle(LOADING_STYLE);
+      try {
+        await safeSync(false);
+      } finally {
+        await checkStatus();
+      }
+    }, 500);
+
     const operations = {
       check: debounce(async function () {
         const status = await checkStatus();
@@ -57,22 +65,31 @@ if (isDevelopment) {
         }
         hidePopup();
       }),
+      sync: debounce(async function () {
+        setPluginStyle(LOADING_STYLE);
+        hidePopup();
+        try {
+          await safeSync(true);
+        } finally {
+          await checkStatus();
+        }
+      }),
       pull: debounce(async function () {
-        console.log("[faiz:] === pull click");
+        console.log("[logseq-git:] === pull click");
         setPluginStyle(LOADING_STYLE);
         hidePopup();
         await pull(false);
         checkStatus();
       }),
       pullRebase: debounce(async function () {
-        console.log("[faiz:] === pullRebase click");
+        console.log("[logseq-git:] === pullRebase click");
         setPluginStyle(LOADING_STYLE);
         hidePopup();
         await pullRebase();
         checkStatus();
       }),
       checkout: debounce(async function () {
-        console.log("[faiz:] === checkout click");
+        console.log("[logseq-git:] === checkout click");
         hidePopup();
         checkout();
       }),
@@ -90,30 +107,24 @@ if (isDevelopment) {
       commitAndPush: debounce(async function () {
         setPluginStyle(LOADING_STYLE);
         hidePopup();
-
-        const status = await checkStatus();
-        const changed = status?.stdout !== "";
-        if (changed) {
-          const res = await commit(
-              true,
-              commitMessage()
-          );
-          if (res.exitCode === 0) await push(true);
+        try {
+          await commitAndSync(true);
+        } finally {
+          await checkStatus();
         }
-        checkStatus();
       }),
       log: debounce(async function () {
-        console.log("[faiz:] === log click");
+        console.log("[logseq-git:] === log click");
         const res = await log(false);
         logseq.UI.showMsg(res?.stdout, "success", { timeout: 0 });
         hidePopup();
       }),
       showPopup: debounce(async function () {
-        console.log("[faiz:] === showPopup click");
+        console.log("[logseq-git:] === showPopup click");
         showPopup();
       }),
       hidePopup: debounce(function () {
-        console.log("[faiz:] === hidePopup click");
+        console.log("[logseq-git:] === hidePopup click");
         hidePopup();
       }),
     };
@@ -126,6 +137,7 @@ if (isDevelopment) {
         '<a data-on-click="showPopup" class="button"><i class="ti ti-brand-git"></i></a><div id="plugin-git-content-wrapper"></div>',
     });
     logseq.useSettingsSchema(SETTINGS_SCHEMA);
+
     setTimeout(() => {
       const buttons = (logseq.settings?.buttons as string[])
         ?.map((title) => BUTTONS.find((b) => b.title === title))
@@ -147,13 +159,10 @@ if (isDevelopment) {
           `,
           "text/html"
         );
-        // remove .plugin-git-container if exists
         const container = top?.document?.querySelector(".plugin-git-container");
-        console.log("[faiz:] === container", container);
+        console.log("[logseq-git:] === container", container);
         if (container) top?.document?.body.removeChild(container);
-        top?.document?.body.appendChild(
-          doc.body.childNodes?.[0]?.cloneNode(true)
-        );
+        top?.document?.body.appendChild(doc.body.childNodes?.[0]?.cloneNode(true));
         top?.document
           ?.querySelector(".plugin-git-mask")
           ?.addEventListener("click", hidePopup);
@@ -168,8 +177,9 @@ if (isDevelopment) {
     logseq.App.onRouteChanged(async () => {
       checkStatusWithDebounce();
     });
+
     if (logseq.settings?.checkWhenDBChanged) {
-      logseq.DB.onChanged(({ blocks, txData, txMeta }) => {
+      logseq.DB.onChanged(() => {
         checkStatusWithDebounce();
       });
     }
@@ -177,18 +187,31 @@ if (isDevelopment) {
     if (logseq.settings?.autoCheckSynced) checkIsSynced();
     checkStatusWithDebounce();
 
+    if (logseq.settings?.autoSyncOnStartup) {
+      setTimeout(() => runAutoSync(), 1200);
+    }
+
+    logseq.App.onCurrentGraphChanged(() => {
+      if (logseq.settings?.autoSyncOnGraphChange) {
+        setTimeout(() => runAutoSync(), 500);
+      }
+    });
+
     if (top) {
       top.document?.addEventListener("visibilitychange", async () => {
         const visibilityState = top?.document?.visibilityState;
 
         if (visibilityState === "visible") {
           if (logseq.settings?.autoCheckSynced) checkIsSynced();
+          if (logseq.settings?.autoSyncOnFocus) runAutoSync();
         } else if (visibilityState === "hidden") {
-          // logseq.UI.showMsg(`Page is hidden: ${new Date()}`, 'success', { timeout: 0 })
-          // noChange void
-          // changed commit push
           if (logseq.settings?.autoPush) {
-            operations.commitAndPush();
+            setPluginStyle(LOADING_STYLE);
+            try {
+              await commitAndSync(false);
+            } finally {
+              await checkStatus();
+            }
           }
         }
       });
@@ -205,10 +228,11 @@ if (isDevelopment) {
       },
       () => operations.commit()
     );
+
     logseq.App.registerCommandPalette(
       {
         key: "logseq-plugin-git:commit&push",
-        label: "Commit & Push",
+        label: "Commit & Sync",
         keybinding: {
           binding: "mod+s",
           mode: "global",
@@ -216,16 +240,17 @@ if (isDevelopment) {
       },
       () => operations.commitAndPush()
     );
+
     logseq.App.registerCommandPalette(
-        {
-          key: "logseq-plugin-git:rebase",
-          label: "Pull Rebase",
-          keybinding: {
-            binding: "mod+alt+s",
-            mode: "global",
-          },
+      {
+        key: "logseq-plugin-git:rebase",
+        label: "Pull Rebase",
+        keybinding: {
+          binding: "mod+alt+s",
+          mode: "global",
         },
-        () => operations.pullRebase()
+      },
+      () => operations.pullRebase()
     );
   });
 }

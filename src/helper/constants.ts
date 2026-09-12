@@ -88,27 +88,22 @@ ${COMMON_STYLE}
   animation: blink 1s linear infinite;
 }
 @keyframes blink {
-  0% {
-    opacity: 0;
-  }
-  50% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-  }
+  0% { opacity: 0; }
+  50% { opacity: 1; }
+  100% { opacity: 0; }
 }
 `;
 
 export const BUTTONS = [
   { key: "status", title: "Check Status", event: "check" },
+  { key: "sync", title: "Sync Now", event: "sync" },
   { key: "log", title: "Show Log", event: "log" },
   { key: "pull", title: "Pull", event: "pull" },
   { key: "pullRebase", title: "Pull Rebase", event: "pullRebase" },
   { key: "checkout", title: "Checkout", event: "checkout" },
   { key: "commit", title: "Commit", event: "commit" },
   { key: "push", title: "Push", event: "push" },
-  { key: "commitAndPush", title: "Commit & Push", event: "commitAndPush" },
+  { key: "commitAndPush", title: "Commit & Sync", event: "commitAndPush" },
 ];
 
 export const SETTINGS_SCHEMA: SettingSchemaDesc[] = [
@@ -116,7 +111,7 @@ export const SETTINGS_SCHEMA: SettingSchemaDesc[] = [
     key: "buttons",
     title: "Buttons",
     type: "enum",
-    default: ["Check Status", "Show Log", "Pull Rebase", "Commit & Push"],
+    default: ["Check Status", "Sync Now", "Show Log", "Pull Rebase", "Commit & Sync"],
     description: "Select buttons to show",
     enumPicker: "checkbox",
     enumChoices: BUTTONS.map(({ title }) => title),
@@ -126,22 +121,42 @@ export const SETTINGS_SCHEMA: SettingSchemaDesc[] = [
     title: "Check Status when DB Changed",
     type: "boolean",
     default: true,
-    description: "Check status when DB changed, restart logseq to take effect",
+    description: "Check status when DB changed, restart Logseq to take effect",
   },
   {
     key: "autoCheckSynced",
     title: "Auto Check If Synced",
     type: "boolean",
     default: false,
-    description:
-      "Automatically check if the local version is the same as the remote",
+    description: "Automatically check if the local version is the same as the remote",
+  },
+  {
+    key: "autoSyncOnStartup",
+    title: "Auto Sync on Startup",
+    type: "boolean",
+    default: true,
+    description: "Safely fetch and synchronize the current graph when the plugin starts",
+  },
+  {
+    key: "autoSyncOnFocus",
+    title: "Auto Sync when Logseq Becomes Visible",
+    type: "boolean",
+    default: true,
+    description: "Safely synchronize when returning to Logseq from another application",
+  },
+  {
+    key: "autoSyncOnGraphChange",
+    title: "Auto Sync when Graph Changes",
+    type: "boolean",
+    default: true,
+    description: "Safely synchronize after switching to another graph",
   },
   {
     key: "autoPush",
     title: "Auto Push",
     type: "boolean",
     default: false,
-    description: "Auto push when logseq hide",
+    description: "Commit local changes and safely synchronize when Logseq becomes hidden",
   },
   {
     key: "typeCommitMessage",
@@ -150,7 +165,12 @@ export const SETTINGS_SCHEMA: SettingSchemaDesc[] = [
     default: "Default Message With Date",
     description: "Type of commit message to use",
     enumPicker: "select",
-    enumChoices: ['Custom Message' , 'Default Message', 'Custom Message With Date', 'Default Message With Date'],
+    enumChoices: [
+      "Custom Message",
+      "Default Message",
+      "Custom Message With Date",
+      "Default Message With Date",
+    ],
   },
   {
     key: "customCommitMessage",
@@ -158,5 +178,5 @@ export const SETTINGS_SCHEMA: SettingSchemaDesc[] = [
     type: "string",
     default: "",
     description: "Custom commit message for plugin (valid only if commit message is set to Custom Message)",
-  }
+  },
 ];
